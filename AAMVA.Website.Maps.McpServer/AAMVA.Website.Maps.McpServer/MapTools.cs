@@ -297,16 +297,16 @@ var $j = jQuery.noConflict();
         Directory.CreateDirectory(razorDir);
         File.WriteAllText(razorPath, razorContent);
 
-        // ── Summary ───────────────────────────────────────────────────────────
-        var relJs    = jsPath.Replace(RepoRoot, "").TrimStart(Path.DirectorySeparatorChar);
-        var relRazor = razorPath.Replace(RepoRoot, "").TrimStart(Path.DirectorySeparatorChar);
-
         return $"""
-✅ Map '{identifier}' files written:
-  {relJs}
-  {relRazor}
+✅ Map '{identifier}' files written.
 
-Review the map with render_map_preview, then call register_map to add it to MapsDataService.cs.
+JS config  (pass this to render_map_preview):
+  {jsPath}
+
+Razor page:
+  {razorPath}
+
+Next: call render_map_preview with jsConfigPath="{jsPath}", then register_map once approved.
 """;
     }
 
