@@ -16,12 +16,12 @@ public static class RenderTools
     [McpServerTool]
     [Description(
         "Render a Highcharts map config as a PNG image so you can see what the map will look like. " +
-        "Pass the absolute path to a JS map config file and optional sample data. " +
-        "Returns a base64-encoded PNG image.")]
+        "Pass either the filename without extension (exactly as returned by list_maps, e.g. 'us-s2s-implementation') " +
+        "or a full absolute path. Returns a PNG image.")]
     public static async Task<IEnumerable<AIContent>> RenderMapPreview(
         [Description(
-            "Absolute path to the JS map config file, e.g. " +
-            "'/repo/AAMVA.Website.Maps/AAMVA.Website.Maps/wwwroot/Scripts/maps-config/driver-systems/us-s2s-implementation.js'")]
+            "Filename without extension as returned by list_maps (e.g. 'us-s2s-implementation'), " +
+            "or a full absolute path to the JS config file.")]
         string jsConfigPath,
 
         [Description(
@@ -30,8 +30,12 @@ public static class RenderTools
             "If omitted the map renders with no data (all states grey).")]
         string? sampleDataJson = null)
     {
+        // Accept filename (from list_maps) or absolute path
+        jsConfigPath = MapTools.ResolveJsConfigPath(jsConfigPath)
+                       ?? jsConfigPath; // keep original so error message is useful
+
         if (!File.Exists(jsConfigPath))
-            return [new TextContent($"File not found: {jsConfigPath}")];
+            return [new TextContent($"File not found: {jsConfigPath}. Use list_maps to see valid filenames.")];
 
         var jsConfig     = File.ReadAllText(jsConfigPath);
         var scriptsDir   = Path.Combine(WwwRoot, "Scripts");

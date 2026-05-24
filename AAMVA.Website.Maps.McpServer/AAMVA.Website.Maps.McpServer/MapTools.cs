@@ -34,8 +34,22 @@ public static class MapTools
     private static string ColorToLegendClass(string colorConstant) =>
         "maps-" + Regex.Replace(colorConstant, "^color", "").ToLower();
 
-    private static string ToKebabCase(string pascal) =>
-        Regex.Replace(pascal, "([A-Z])", "-$1").TrimStart('-').ToLower();
+    private static string ToKebabCase(string pascal)
+    {
+        // "USRealIDCompliance" → "us-real-id-compliance"
+        var s = Regex.Replace(pascal, @"([a-z0-9])([A-Z])", "$1-$2");
+        s = Regex.Replace(s, @"([A-Z]+)([A-Z][a-z])", "$1-$2");
+        return s.ToLower();
+    }
+
+    // Resolve a JS config file by filename (without extension) or absolute path
+    internal static string? ResolveJsConfigPath(string filenameOrPath)
+    {
+        if (Path.IsPathRooted(filenameOrPath) && File.Exists(filenameOrPath))
+            return filenameOrPath;
+        var matches = Directory.GetFiles(MapsConfigRoot, $"{filenameOrPath}.js", SearchOption.AllDirectories);
+        return matches.Length > 0 ? matches[0] : null;
+    }
 
     private static string PascalToCamel(string pascal) =>
         char.ToLower(pascal[0]) + pascal[1..];
@@ -53,14 +67,27 @@ public static class MapTools
 
     [McpServerTool]
     [Description(
+        "Show server configuration: the repo root path and maps config directory. " +
+        "Call this first if you are unsure about paths.")]
+    public static string GetServerInfo() =>
+        $"""
+        MAPS_REPO_ROOT : {RepoRoot}
+        Maps config dir: {MapsConfigRoot}
+        Data service   : {DataServicePath}
+        """;
+
+    [McpServerTool]
+    [Description(
         "List all existing maps organised by category. " +
-        "Returns the JS config filename (without extension) for each map.")]
+        "Returns the filename (without extension) for each map — pass it directly to render_map_preview or get_map_config.")]
     public static string ListMaps()
     {
         if (!Directory.Exists(MapsConfigRoot))
             return $"Maps config directory not found at: {MapsConfigRoot}";
 
         var sb = new StringBuilder();
+        sb.AppendLine($"Maps config root: {MapsConfigRoot}");
+        sb.AppendLine();
         foreach (var dir in Directory.GetDirectories(MapsConfigRoot).OrderBy(d => d))
         {
             var category = Path.GetFileName(dir);
