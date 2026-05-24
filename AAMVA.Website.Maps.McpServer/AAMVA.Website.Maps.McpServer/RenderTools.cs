@@ -1,5 +1,5 @@
-using Microsoft.Extensions.AI;
 using Microsoft.Playwright;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using System.ComponentModel;
 using System.Text.RegularExpressions;
@@ -23,7 +23,7 @@ public static class RenderTools
         "Pass either the filename without extension as returned by list_maps " +
         "(e.g. 'us-s2s-implementation') or a full absolute path. " +
         "Returns a PNG image.")]
-    public static async Task<IEnumerable<AIContent>> RenderMapPreview(
+    public static async Task<IEnumerable<ContentBlock>> RenderMapPreview(
         [Description(
             "Filename without extension as returned by list_maps (e.g. 'us-s2s-implementation'), " +
             "or a full absolute path to the JS config file.")]
@@ -39,7 +39,7 @@ public static class RenderTools
         jsConfigPath = MapTools.ResolveJsConfigPath(jsConfigPath) ?? jsConfigPath;
 
         if (!File.Exists(jsConfigPath))
-            return [new TextContent($"File not found: {jsConfigPath}. Use list_maps to see valid filenames.")];
+            return [new TextContentBlock { Text = $"File not found: {jsConfigPath}. Use list_maps to see valid filenames." }];
 
         var jsConfig    = await File.ReadAllTextAsync(jsConfigPath);
         var containerId = Regex.Match(jsConfig, @"mapTagSelector\s*:\s*'([^']+)'") is { Success: true } m
@@ -179,13 +179,13 @@ public static class RenderTools
 
             return
             [
-                new DataContent(imageData, "image/png"),
-                new TextContent($"Rendered: {Path.GetFileName(jsConfigPath)}")
+                new ImageContentBlock { Data = imageData, MimeType = "image/png" },
+                new TextContentBlock  { Text = $"Rendered: {Path.GetFileName(jsConfigPath)}" }
             ];
         }
         catch (Exception ex)
         {
-            return [new TextContent($"Render failed: {ex.Message}")];
+            return [new TextContentBlock { Text = $"Render failed: {ex.Message}" }];
         }
     }
 }
