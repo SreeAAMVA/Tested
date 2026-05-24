@@ -42,13 +42,25 @@ public static class MapTools
         return s.ToLower();
     }
 
-    // Resolve a JS config file by filename (without extension) or absolute path
+    // Resolve a JS config file by filename (without extension) or absolute path.
+    // Tries exact match first, then case-insensitive, then hyphen-stripped fuzzy match
+    // so "us-real-id-compliance" finds "u-s-real-i-d-compliance" and vice-versa.
     internal static string? ResolveJsConfigPath(string filenameOrPath)
     {
         if (Path.IsPathRooted(filenameOrPath) && File.Exists(filenameOrPath))
             return filenameOrPath;
-        var matches = Directory.GetFiles(MapsConfigRoot, $"{filenameOrPath}.js", SearchOption.AllDirectories);
-        return matches.Length > 0 ? matches[0] : null;
+
+        var allJs = Directory.GetFiles(MapsConfigRoot, "*.js", SearchOption.AllDirectories);
+
+        // Exact
+        var exact = allJs.FirstOrDefault(f =>
+            Path.GetFileNameWithoutExtension(f).Equals(filenameOrPath, StringComparison.OrdinalIgnoreCase));
+        if (exact != null) return exact;
+
+        // Fuzzy: strip hyphens and compare — handles kebab-case mismatches
+        var needle = filenameOrPath.Replace("-", "").ToLowerInvariant();
+        return allJs.FirstOrDefault(f =>
+            Path.GetFileNameWithoutExtension(f).Replace("-", "").ToLowerInvariant() == needle);
     }
 
     private static string PascalToCamel(string pascal) =>
@@ -106,10 +118,10 @@ public static class MapTools
         [Description("JS config filename without extension, e.g. 'us-s2s-implementation'")]
         string filename)
     {
-        var files = Directory.GetFiles(MapsConfigRoot, $"{filename}.js", SearchOption.AllDirectories);
-        if (files.Length == 0)
-            return $"Map config '{filename}' not found under {MapsConfigRoot}";
-        return File.ReadAllText(files[0]);
+        var path = ResolveJsConfigPath(filename);
+        if (path == null)
+            return $"Map config '{filename}' not found. Use list_maps to see available filenames.";
+        return File.ReadAllText(path);
     }
 
     [McpServerTool]
