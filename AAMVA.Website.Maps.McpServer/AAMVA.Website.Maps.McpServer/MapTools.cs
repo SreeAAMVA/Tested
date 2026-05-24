@@ -325,15 +325,10 @@ var $j = jQuery.noConflict();
         File.WriteAllText(razorPath, razorContent);
 
         return $"""
-✅ Map '{identifier}' files written.
+✅ Map '{identifier}' created.
 
-JS config  (pass this to render_map_preview):
-  {jsPath}
-
-Razor page:
-  {razorPath}
-
-Next: call render_map_preview with jsConfigPath="{jsPath}", then register_map once approved.
+To preview: call render_map_preview with jsConfigPath="{jsFilename}"
+To register: call register_map with identifier="{identifier}" (only after approving the preview)
 """;
     }
 
