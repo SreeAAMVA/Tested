@@ -152,11 +152,11 @@ public static class MapTools
 
     [McpServerTool]
     [Description(
-        "Create a new map. Generates three artefacts: " +
-        "(1) the JavaScript Highcharts config file, " +
-        "(2) the Blazor Razor page, and " +
-        "(3) automatically inserts the C# Map registration into MapsDataService.cs. " +
-        "Returns a summary of what was created.")]
+        "Create a new map. Generates two artefacts: " +
+        "(1) the JavaScript Highcharts config file and " +
+        "(2) the Blazor Razor page. " +
+        "Does NOT register the map in MapsDataService.cs — call register_map after you are " +
+        "happy with the preview. Returns the paths of the files written.")]
     public static string CreateMap(
         [Description("Unique PascalCase identifier, e.g. 'USS2SImplementationStatus'. Used for the Razor page name and MapIdentifier.")]
         string identifier,
@@ -297,12 +297,91 @@ var $j = jQuery.noConflict();
         Directory.CreateDirectory(razorDir);
         File.WriteAllText(razorPath, razorContent);
 
-        // ── 3. Patch MapsDataService.cs ───────────────────────────────────────
-        var serviceSource = File.ReadAllText(DataServicePath);
-        var nextId        = GetNextMapId(serviceSource);
+        // ── Summary ───────────────────────────────────────────────────────────
+        var relJs    = jsPath.Replace(RepoRoot, "").TrimStart(Path.DirectorySeparatorChar);
+        var relRazor = razorPath.Replace(RepoRoot, "").TrimStart(Path.DirectorySeparatorChar);
 
-        var indent    = "                ";
-        var newEntry  = $$"""
+        return $"""
+✅ Map '{identifier}' files written:
+  {relJs}
+  {relRazor}
+
+Review the map with render_map_preview, then call register_map to add it to MapsDataService.cs.
+""";
+    }
+
+    [McpServerTool]
+    [Description(
+        "Register a previously created map in MapsDataService.cs. " +
+        "Call this only after you have reviewed the map preview and are happy with it. " +
+        "Inserts the C# Map entry into the GetAll() list so the application serves the map.")]
+    public static string RegisterMap(
+        [Description("The same identifier used in create_map, e.g. 'USS2SImplementationStatus'.")]
+        string identifier,
+
+        [Description("The same abbreviation used in create_map, e.g. 's2s'.")]
+        string abbreviation,
+
+        [Description("The same category folder used in create_map, e.g. 'driver-systems'.")]
+        string category,
+
+        [Description("Whether to show a header above the map.")]
+        bool showHeader = false,
+
+        [Description("Header text (only used when showHeader is true).")]
+        string header = "",
+
+        [Description("Whether to show a geo-scope changer dropdown.")]
+        bool showGeoChanger = false,
+
+        [Description("Number of rows in the legend table.")]
+        int legendNumRows = 1,
+
+        [Description("Number of columns in the legend table.")]
+        int legendNumColumns = 3,
+
+        [Description("CSS width of the legend, e.g. '33%'.")]
+        string legendWidth = "33%",
+
+        [Description("CSS width of the label column inside the legend.")]
+        string legendLabelColumnWidth = "100%",
+
+        [Description("CSS width of the count/percent columns inside the legend.")]
+        string legendColumnWidth = "100%",
+
+        [Description("Optional footnote message shown below the legend.")]
+        string legendMessage = "",
+
+        [Description("Show jurisdiction counts column in legend.")]
+        bool legendIncludeJurisdictionCounts = false,
+
+        [Description("Show jurisdiction percent column in legend.")]
+        bool legendIncludeJurisdictionPercents = false,
+
+        [Description("Show population percent column in legend.")]
+        bool legendIncludePopulationPercents = false,
+
+        [Description("Show cumulative columns in legend.")]
+        bool legendIncludeCumulativeColumns = false
+    )
+    {
+        var jsFilename = ToKebabCase(identifier);
+
+        // Guard: confirm the JS config file was already created
+        var jsFiles = Directory.GetFiles(MapsConfigRoot, $"{jsFilename}.js", SearchOption.AllDirectories);
+        if (jsFiles.Length == 0)
+            return $"JS config '{jsFilename}.js' not found. Run create_map first.";
+
+        var serviceSource = File.ReadAllText(DataServicePath);
+
+        // Guard: don't insert twice
+        if (Regex.IsMatch(serviceSource, $@"Identifier\s*=\s*""{Regex.Escape(identifier)}"""))
+            return $"'{identifier}' is already registered in MapsDataService.cs.";
+
+        var nextId = GetNextMapId(serviceSource);
+        var indent = "                ";
+
+        var newEntry = $$"""
 
 {{indent}}new Map
 {{indent}}{
@@ -325,7 +404,6 @@ var $j = jQuery.noConflict();
 {{indent}}},
 """;
 
-        // Insert before "return maps;" line
         var patched = Regex.Replace(
             serviceSource,
             @"(\s+return maps;)",
@@ -334,23 +412,12 @@ var $j = jQuery.noConflict();
 
         File.WriteAllText(DataServicePath, patched);
 
-        // ── Summary ───────────────────────────────────────────────────────────
-        var relJs    = jsPath.Replace(RepoRoot, "").TrimStart(Path.DirectorySeparatorChar);
-        var relRazor = razorPath.Replace(RepoRoot, "").TrimStart(Path.DirectorySeparatorChar);
-        var relSvc   = DataServicePath.Replace(RepoRoot, "").TrimStart(Path.DirectorySeparatorChar);
-
+        var relSvc = DataServicePath.Replace(RepoRoot, "").TrimStart(Path.DirectorySeparatorChar);
         return $"""
-✅ Map '{identifier}' created successfully.
+✅ '{identifier}' registered in MapsDataService.cs (Id = {nextId}).
+  {relSvc}
 
-Files written:
-  {relJs}
-  {relRazor}
-
-MapsDataService.cs patched:
-  {relSvc}  (Id = {nextId} inserted)
-
-⚠️  Next step: add per-jurisdiction rows to the database for map GUID {dataGuid}.
-    Each row needs: hc_key (e.g. 'us-ca'), name, value (matching a category value above).
+⚠️  Remember to add per-jurisdiction rows to the database before the map will display data.
 """;
     }
 
