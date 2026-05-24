@@ -7,7 +7,7 @@ var builder = Host.CreateApplicationBuilder(args);
 // Send all logs to stderr so stdout stays clean for MCP stdio transport
 builder.Logging.AddConsole(options =>
 {
-    options.LogToStandardErrorThreshold = LogLevel.Warning;
+    options.LogToStandardErrorThreshold = LogLevel.Trace; // keep stdout clean for MCP JSON
 });
 
 builder.Services
