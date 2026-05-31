@@ -7,9 +7,15 @@ using System.Text.RegularExpressions;
 [McpServerToolType]
 public static class RenderTools
 {
-    // Fake HTTP origin — Playwright intercepts all requests to it and serves
-    // files directly from the wwwroot folder on disk.
+    // Fake HTTP origin — Playwright intercepts every request to it and serves
+    // files directly from the wwwroot folder on disk. We NAVIGATE to this origin
+    // (rather than SetContent) so the page, its scripts, and its fetch/XHR calls
+    // are all same-origin — otherwise cross-origin fetches of the geo JSON and
+    // /api/mapdata would be blocked by CORS.
     private const string FakeOrigin = "http://aamva-maps-preview";
+
+    // Sentinel path for the generated HTML document itself.
+    private const string DocPath = "__preview__.html";
 
     private static string WwwRoot =>
         Path.Combine(
@@ -48,8 +54,11 @@ public static class RenderTools
         var legendId    = containerId.Replace("container", "legendcontainer");
         var dataJson    = sampleDataJson ?? "null";
 
-        // Minimal HTML — scripts are loaded via <script src> so Playwright
-        // intercepts them and serves from disk (no inlining of large files).
+        // Minimal HTML. Scripts load via <script src> from the fake origin so
+        // Playwright serves them from disk. We load the REAL jQuery the site
+        // ships with (the map configs call $j.getJSON, .html(), .each, .val,
+        // .append — a hand-rolled shim cannot cover all of these). mapPrefix is
+        // set before geo-helper.js because that file reads it at load time.
         var html = $$"""
 <!DOCTYPE html>
 <html>
@@ -64,35 +73,17 @@ public static class RenderTools
   <div id="{{containerId}}"></div>
   <div id="{{legendId}}"></div>
 
-  <script src="{{FakeOrigin}}/Scripts/vendor/highmaps.js"></script>
-  <script src="{{FakeOrigin}}/Scripts/vendor/pattern-fill.js"></script>
+  <script src="/Scripts/jquery-3.6.0.min.js"></script>
+  <script src="/Scripts/vendor/highmaps.js"></script>
+  <script src="/Scripts/vendor/pattern-fill.js"></script>
 
-  <!-- Minimal jQuery shim (Highcharts doesn't need jQuery; map configs do) -->
-  <script>
-    (function () {
-      function jq(sel) {
-        if (typeof sel === 'function') { document.addEventListener('DOMContentLoaded', sel); return; }
-        return document.querySelectorAll(sel);
-      }
-      jq.noConflict = function () { return jq; };
-      jq.getJSON = function (url, cb) {
-        fetch(url)
-          .then(function (r) { return r.json(); })
-          .then(cb)
-          .catch(function () { cb(null); });
-        return { done: function () {}, fail: function () {} };
-      };
-      window.jQuery = window.$ = jq;
-    })();
-  </script>
+  <!-- mapPrefix must be defined before geo-helper.js loads -->
+  <script>var mapPrefix = '/';</script>
 
-  <!-- mapPrefix points to our fake origin so all asset URLs are interceptable -->
-  <script>var mapPrefix = '{{FakeOrigin}}/';</script>
-
-  <script src="{{FakeOrigin}}/Scripts/shared/color-helper.js"></script>
-  <script src="{{FakeOrigin}}/Scripts/shared/geo-helper.js"></script>
-  <script src="{{FakeOrigin}}/Scripts/shared/external-legend-helper.js"></script>
-  <script src="{{FakeOrigin}}/Scripts/shared/map-helper.js"></script>
+  <script src="/Scripts/shared/color-helper.js"></script>
+  <script src="/Scripts/shared/geo-helper.js"></script>
+  <script src="/Scripts/shared/external-legend-helper.js"></script>
+  <script src="/Scripts/shared/map-helper.js"></script>
 
   <script>{{jsConfig}}</script>
 </body>
@@ -113,10 +104,22 @@ public static class RenderTools
                 ViewportSize = new ViewportSize { Width = 960, Height = 600 }
             });
 
-            // Intercept all requests to FakeOrigin and serve from wwwroot or return mock data
+            // Intercept every request to FakeOrigin: serve the document, mock the
+            // data API, or serve a static file from wwwroot (case-insensitive).
             await page.RouteAsync($"{FakeOrigin}/**", async route =>
             {
                 var path = new Uri(route.Request.Url).AbsolutePath.TrimStart('/');
+
+                // The generated HTML document itself
+                if (path.Equals(DocPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    await route.FulfillAsync(new RouteFulfillOptions
+                    {
+                        ContentType = "text/html; charset=utf-8",
+                        Body        = html
+                    });
+                    return;
+                }
 
                 // API map data endpoint → return sample data (or null)
                 if (path.StartsWith("api/mapdata", StringComparison.OrdinalIgnoreCase))
@@ -129,11 +132,10 @@ public static class RenderTools
                     return;
                 }
 
-                // Static file → serve from wwwroot
-                var filePath = Path.Combine(WwwRoot,
-                    path.Replace('/', Path.DirectorySeparatorChar));
-
-                if (File.Exists(filePath))
+                // Static file → serve from wwwroot (case-insensitive: geo-helper
+                // requests 'scripts/...' lowercase but the folder is 'Scripts')
+                var filePath = ResolveCaseInsensitive(WwwRoot, path);
+                if (filePath is not null)
                 {
                     var ct = Path.GetExtension(filePath).ToLower() switch
                     {
@@ -153,20 +155,21 @@ public static class RenderTools
                     await route.FulfillAsync(new RouteFulfillOptions
                     {
                         Status = 404,
-                        Body   = $"Not found: {filePath}"
+                        Body   = $"Not found: {path}"
                     });
                 }
             });
 
-            // Inject HTML directly — no network request for the page itself
-            await page.SetContentAsync(html, new PageSetContentOptions
+            // Navigate to the fake origin so the page and all its fetch/XHR calls
+            // are same-origin (no CORS blocking on the geo JSON or /api/mapdata).
+            await page.GotoAsync($"{FakeOrigin}/{DocPath}", new PageGotoOptions
             {
                 WaitUntil = WaitUntilState.NetworkIdle
             });
 
             // Wait for Highcharts SVG (generous timeout — geo JSON can be a few MB)
             await page.WaitForFunctionAsync(
-                "() => document.querySelector('svg') !== null",
+                $"() => document.querySelector('#{containerId} svg') !== null",
                 null,
                 new PageWaitForFunctionOptions { Timeout = 30_000 });
 
@@ -187,5 +190,24 @@ public static class RenderTools
         {
             return [new TextContentBlock { Text = $"Render failed: {ex.Message}" }];
         }
+    }
+
+    // Resolve a forward-slash relative URL path to a file on disk, matching each
+    // segment case-insensitively. Returns null if no matching file exists.
+    private static string? ResolveCaseInsensitive(string root, string relativeUrlPath)
+    {
+        var direct = Path.Combine(root, relativeUrlPath.Replace('/', Path.DirectorySeparatorChar));
+        if (File.Exists(direct)) return direct;
+
+        var current = root;
+        foreach (var seg in relativeUrlPath.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!Directory.Exists(current)) return null;
+            var match = Directory.EnumerateFileSystemEntries(current)
+                .FirstOrDefault(e => string.Equals(Path.GetFileName(e), seg, StringComparison.OrdinalIgnoreCase));
+            if (match is null) return null;
+            current = match;
+        }
+        return File.Exists(current) ? current : null;
     }
 }
