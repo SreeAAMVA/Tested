@@ -171,9 +171,13 @@ public static class RenderTools
 
             // Navigate to the fake origin so the page and all its fetch/XHR calls
             // are same-origin (no CORS blocking on the geo JSON or /api/mapdata).
+            // Use Load (not NetworkIdle) — the map config's async geo-JSON fetch
+            // keeps the network active indefinitely from Playwright's perspective,
+            // causing a NetworkIdle wait to hit the 30s navigation timeout.
             await page.GotoAsync($"{FakeOrigin}/{DocPath}", new PageGotoOptions
             {
-                WaitUntil = WaitUntilState.NetworkIdle
+                WaitUntil = WaitUntilState.Load,
+                Timeout   = 15_000
             });
 
             // Wait for Highcharts SVG (generous timeout — geo JSON can be a few MB).
