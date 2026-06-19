@@ -160,6 +160,15 @@ public static class RenderTools
                 }
             });
 
+            // Collect browser console messages and page errors for diagnostics
+            var consoleMessages = new System.Collections.Generic.List<string>();
+            page.Console  += (_, e) => consoleMessages.Add($"[{e.Type}] {e.Text}");
+            page.PageError += (_, e) => consoleMessages.Add($"[pageerror] {e}");
+
+            // Track 404s from the route handler
+            var notFound = new System.Collections.Generic.List<string>();
+            page.Response += (_, r) => { if (r.Status == 404) notFound.Add(r.Url); };
+
             // Navigate to the fake origin so the page and all its fetch/XHR calls
             // are same-origin (no CORS blocking on the geo JSON or /api/mapdata).
             await page.GotoAsync($"{FakeOrigin}/{DocPath}", new PageGotoOptions
@@ -167,24 +176,47 @@ public static class RenderTools
                 WaitUntil = WaitUntilState.NetworkIdle
             });
 
-            // Wait for Highcharts SVG (generous timeout — geo JSON can be a few MB)
-            await page.WaitForFunctionAsync(
-                $"() => document.querySelector('#{containerId} svg') !== null",
-                null,
-                new PageWaitForFunctionOptions { Timeout = 30_000 });
+            // Wait for Highcharts SVG (generous timeout — geo JSON can be a few MB).
+            // On timeout, fall through and return a diagnostic screenshot + console log.
+            byte[]? imageData = null;
+            string  renderNote;
+            try
+            {
+                await page.WaitForFunctionAsync(
+                    $"() => document.querySelector('#{containerId} svg') !== null",
+                    null,
+                    new PageWaitForFunctionOptions { Timeout = 30_000 });
 
-            await page.WaitForTimeoutAsync(500);
+                await page.WaitForTimeoutAsync(500);
 
-            var element   = await page.QuerySelectorAsync($"#{containerId}");
-            var imageData = element is not null
-                ? await element.ScreenshotAsync()
-                : await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
+                var element = await page.QuerySelectorAsync($"#{containerId}");
+                imageData  = element is not null
+                    ? await element.ScreenshotAsync()
+                    : await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
+                renderNote = $"Rendered: {Path.GetFileName(jsConfigPath)}";
+            }
+            catch (TimeoutException)
+            {
+                // SVG never appeared — grab a screenshot anyway so we can see the state
+                imageData  = await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
+                renderNote = $"TIMEOUT — SVG not found after 30s. Screenshot shows page state.";
+            }
 
-            return
-            [
+            var diagnostics = new System.Text.StringBuilder();
+            if (notFound.Count > 0)
+                diagnostics.AppendLine("404s: " + string.Join(", ", notFound));
+            if (consoleMessages.Count > 0)
+                diagnostics.AppendLine("Console:\n" + string.Join("\n", consoleMessages));
+
+            var result = new System.Collections.Generic.List<ContentBlock>
+            {
                 new ImageContentBlock { Data = imageData, MimeType = "image/png" },
-                new TextContentBlock  { Text = $"Rendered: {Path.GetFileName(jsConfigPath)}" }
-            ];
+                new TextContentBlock  { Text = renderNote }
+            };
+            if (diagnostics.Length > 0)
+                result.Add(new TextContentBlock { Text = diagnostics.ToString().Trim() });
+
+            return result;
         }
         catch (Exception ex)
         {
