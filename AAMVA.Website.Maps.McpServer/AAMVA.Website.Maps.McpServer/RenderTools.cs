@@ -147,12 +147,25 @@ public static class RenderTools
     }
 
     // Append a "'filename.json': <json>," entry for the inlined GEO object.
+    // The geo files ship pretty-printed; minify them to stay under the MCP-app
+    // ~1MB resource limit (all four together drop from ~560KB to ~287KB).
     private static void AppendGeoEntry(StringBuilder sb, string fileName)
     {
         var path = ResolveCaseInsensitive(WwwRoot, "Scripts/maps-geo/" + fileName);
         if (path is null) return;
+        var raw = File.ReadAllText(path);
+        string compact;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(raw);
+            compact = System.Text.Json.JsonSerializer.Serialize(doc.RootElement);
+        }
+        catch
+        {
+            compact = raw.Trim();
+        }
         sb.Append($"    '{fileName}': ");
-        sb.Append(File.ReadAllText(path).Trim());
+        sb.Append(compact);
         sb.Append(",\n");
     }
 
