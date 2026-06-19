@@ -194,15 +194,21 @@ public static class RenderTools
                 await page.WaitForTimeoutAsync(500);
 
                 var element = await page.QuerySelectorAsync($"#{containerId}");
-                imageData  = element is not null
+                var raw    = element is not null
                     ? await element.ScreenshotAsync()
                     : await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
+                // MCP protocol requires base64 string in "data". The SDK serialises
+                // ReadOnlyMemory<byte> as raw characters, not base64, so we encode
+                // the base64 string to ASCII bytes — those bytes become the base64
+                // string in JSON.
+                imageData  = System.Text.Encoding.ASCII.GetBytes(Convert.ToBase64String(raw));
                 renderNote = $"Rendered: {Path.GetFileName(jsConfigPath)}";
             }
             catch (TimeoutException)
             {
                 // SVG never appeared — grab a screenshot anyway so we can see the state
-                imageData  = await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
+                var rawTimeout = await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
+                imageData  = System.Text.Encoding.ASCII.GetBytes(Convert.ToBase64String(rawTimeout));
                 renderNote = $"TIMEOUT — SVG not found after 30s. Screenshot shows page state.";
             }
 
