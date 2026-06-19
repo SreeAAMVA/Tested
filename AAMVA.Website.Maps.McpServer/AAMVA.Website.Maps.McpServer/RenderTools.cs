@@ -202,7 +202,13 @@ public static class RenderTools
                 // the base64 string to ASCII bytes — those bytes become the base64
                 // string in JSON.
                 imageData  = System.Text.Encoding.ASCII.GetBytes(Convert.ToBase64String(raw));
-                renderNote = $"Rendered: {Path.GetFileName(jsConfigPath)}";
+
+                // Also save to a temp file so the user can open it directly
+                // (Claude Desktop may not render the inline image in the chat UI).
+                var pngPath = Path.Combine(Path.GetTempPath(),
+                    Path.GetFileNameWithoutExtension(jsConfigPath) + "-preview.png");
+                await File.WriteAllBytesAsync(pngPath, raw);
+                renderNote = $"Rendered: {Path.GetFileName(jsConfigPath)}\nSaved to: {pngPath}";
             }
             catch (TimeoutException)
             {
