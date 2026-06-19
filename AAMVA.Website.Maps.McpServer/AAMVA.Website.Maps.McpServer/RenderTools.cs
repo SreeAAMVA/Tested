@@ -1,4 +1,3 @@
-using Microsoft.Playwright;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using System.ComponentModel;
@@ -7,28 +6,12 @@ using System.Text.RegularExpressions;
 [McpServerToolType]
 public static class RenderTools
 {
-    // Fake HTTP origin — Playwright intercepts every request to it and serves
-    // files directly from the wwwroot folder on disk. We NAVIGATE to this origin
-    // (rather than SetContent) so the page, its scripts, and its fetch/XHR calls
-    // are all same-origin — otherwise cross-origin fetches of the geo JSON and
-    // /api/mapdata would be blocked by CORS.
-    private const string FakeOrigin = "http://aamva-maps-preview";
-
-    // Sentinel path for the generated HTML document itself.
-    private const string DocPath = "__preview__.html";
-
-    private static string WwwRoot =>
-        Path.Combine(
-            Environment.GetEnvironmentVariable("MAPS_REPO_ROOT")
-            ?? throw new InvalidOperationException("MAPS_REPO_ROOT not set."),
-            "AAMVA.Website.Maps", "AAMVA.Website.Maps", "wwwroot");
-
     [McpServerTool]
     [Description(
-        "Render a Highcharts map config as a PNG image so you can see what the map will look like. " +
+        "Render a Highcharts map config as an interactive map preview so you can see what the map will look like. " +
         "Pass either the filename without extension as returned by list_maps " +
         "(e.g. 'us-s2s-implementation') or a full absolute path. " +
-        "Returns a PNG image.")]
+        "Returns an interactive HTML map rendered inline.")]
     public static async Task<IEnumerable<ContentBlock>> RenderMapPreview(
         [Description(
             "Filename without extension as returned by list_maps (e.g. 'us-s2s-implementation'), " +
@@ -41,7 +24,9 @@ public static class RenderTools
             "If omitted the map renders with no data (all states grey).")]
         string? sampleDataJson = null)
     {
-        // Resolve filename → absolute path
+        var server = LocalServer.Instance
+            ?? throw new InvalidOperationException("Local server is not running.");
+
         jsConfigPath = MapTools.ResolveJsConfigPath(jsConfigPath) ?? jsConfigPath;
 
         if (!File.Exists(jsConfigPath))
@@ -52,210 +37,81 @@ public static class RenderTools
                           ? m.Groups[1].Value
                           : "map-container";
         var legendId    = containerId.Replace("container", "legendcontainer");
-        var dataJson    = sampleDataJson ?? "null";
+        var baseUrl     = $"http://localhost:{server.Port}";
 
-        // Minimal HTML. Scripts load via <script src> from the fake origin so
-        // Playwright serves them from disk. We load the REAL jQuery the site
-        // ships with (the map configs call $j.getJSON, .html(), .each, .val,
-        // .append — a hand-rolled shim cannot cover all of these). mapPrefix is
-        // set before geo-helper.js because that file reads it at load time.
+        // If sample data supplied, store it so the local server returns it for
+        // the /api/mapdata/* calls the map config makes.
+        var dataApiKey = $"/api/mapdata/{containerId}";
+        if (sampleDataJson is not null)
+            server.SetDataForPath(dataApiKey, sampleDataJson);
+        else
+            server.ClearData(dataApiKey);
+
+        // Inline sample data as a JS variable so it can also override $.getJSON
+        // for the exact GUID-keyed endpoint in the config (without needing to know the GUID).
+        var inlineDataScript = sampleDataJson is not null
+            ? $$"""
+              <script>
+                (function () {
+                  var _data = {{sampleDataJson}};
+                  var _orig = jQuery.getJSON;
+                  jQuery.getJSON = function (url, cb) {
+                    if (url.indexOf('api/mapdata') !== -1) { setTimeout(function () { cb(_data); }, 0); return { done: function(){}, fail: function(){} }; }
+                    return _orig.apply(this, arguments);
+                  };
+                })();
+              </script>
+              """
+            : "";
+
         var html = $$"""
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <style>
-    body { margin: 0; padding: 20px; background: #fff; }
-    #{{containerId}} { min-height: 500px; width: 900px; }
+    body { margin: 0; padding: 16px; background: #fff; font-family: sans-serif; }
+    #{{containerId}} { width: 100%; min-height: 480px; }
   </style>
 </head>
 <body>
   <div id="{{containerId}}"></div>
   <div id="{{legendId}}"></div>
 
-  <script src="/Scripts/jquery-3.6.0.min.js"></script>
-  <script src="/Scripts/vendor/highmaps.js"></script>
-  <script src="/Scripts/vendor/pattern-fill.js"></script>
+  <script src="{{baseUrl}}/Scripts/jquery-3.6.0.min.js"></script>
+  <script src="{{baseUrl}}/Scripts/vendor/highmaps.js"></script>
+  <script src="{{baseUrl}}/Scripts/vendor/pattern-fill.js"></script>
 
-  <!-- mapPrefix must be defined before geo-helper.js loads -->
-  <script>var mapPrefix = '/';</script>
+  <!-- mapPrefix must be defined before geo-helper.js -->
+  <script>var mapPrefix = '{{baseUrl}}/';</script>
 
-  <script src="/Scripts/shared/color-helper.js"></script>
-  <script src="/Scripts/shared/geo-helper.js"></script>
-  <script src="/Scripts/shared/external-legend-helper.js"></script>
-  <script src="/Scripts/shared/map-helper.js"></script>
+  <script src="{{baseUrl}}/Scripts/shared/color-helper.js"></script>
+  <script src="{{baseUrl}}/Scripts/shared/geo-helper.js"></script>
+  <script src="{{baseUrl}}/Scripts/shared/external-legend-helper.js"></script>
+  <script src="{{baseUrl}}/Scripts/shared/map-helper.js"></script>
 
+  {{inlineDataScript}}
   <script>{{jsConfig}}</script>
 </body>
 </html>
 """;
 
-        try
-        {
-            using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        return
+        [
+            new EmbeddedResourceBlock
             {
-                Headless = true,
-                Args = ["--no-sandbox", "--disable-setuid-sandbox"]
-            });
-
-            var page = await browser.NewPageAsync(new BrowserNewPageOptions
-            {
-                ViewportSize = new ViewportSize { Width = 960, Height = 600 }
-            });
-
-            // Intercept every request to FakeOrigin: serve the document, mock the
-            // data API, or serve a static file from wwwroot (case-insensitive).
-            await page.RouteAsync($"{FakeOrigin}/**", async route =>
-            {
-                var path = new Uri(route.Request.Url).AbsolutePath.TrimStart('/');
-
-                // The generated HTML document itself
-                if (path.Equals(DocPath, StringComparison.OrdinalIgnoreCase))
+                Resource = new TextResourceContents
                 {
-                    await route.FulfillAsync(new RouteFulfillOptions
-                    {
-                        ContentType = "text/html; charset=utf-8",
-                        Body        = html
-                    });
-                    return;
+                    Uri      = $"map-preview://{Path.GetFileNameWithoutExtension(jsConfigPath)}",
+                    MimeType = "text/html;profile=mcp-app",
+                    Text     = html
                 }
-
-                // API map data endpoint → return sample data (or null)
-                if (path.StartsWith("api/mapdata", StringComparison.OrdinalIgnoreCase))
-                {
-                    await route.FulfillAsync(new RouteFulfillOptions
-                    {
-                        ContentType = "application/json",
-                        Body        = dataJson
-                    });
-                    return;
-                }
-
-                // Static file → serve from wwwroot (case-insensitive: geo-helper
-                // requests 'scripts/...' lowercase but the folder is 'Scripts')
-                var filePath = ResolveCaseInsensitive(WwwRoot, path);
-                if (filePath is not null)
-                {
-                    var ct = Path.GetExtension(filePath).ToLower() switch
-                    {
-                        ".js"   => "application/javascript",
-                        ".json" => "application/json",
-                        ".css"  => "text/css",
-                        _       => "text/plain"
-                    };
-                    await route.FulfillAsync(new RouteFulfillOptions
-                    {
-                        ContentType = ct,
-                        BodyBytes   = await File.ReadAllBytesAsync(filePath)
-                    });
-                }
-                else
-                {
-                    await route.FulfillAsync(new RouteFulfillOptions
-                    {
-                        Status = 404,
-                        Body   = $"Not found: {path}"
-                    });
-                }
-            });
-
-            // Collect browser console messages and page errors for diagnostics
-            var consoleMessages = new System.Collections.Generic.List<string>();
-            page.Console  += (_, e) => consoleMessages.Add($"[{e.Type}] {e.Text}");
-            page.PageError += (_, e) => consoleMessages.Add($"[pageerror] {e}");
-
-            // Track 404s from the route handler
-            var notFound = new System.Collections.Generic.List<string>();
-            page.Response += (_, r) => { if (r.Status == 404) notFound.Add(r.Url); };
-
-            // Navigate to the fake origin so the page and all its fetch/XHR calls
-            // are same-origin (no CORS blocking on the geo JSON or /api/mapdata).
-            // Use Load (not NetworkIdle) — the map config's async geo-JSON fetch
-            // keeps the network active indefinitely from Playwright's perspective,
-            // causing a NetworkIdle wait to hit the 30s navigation timeout.
-            await page.GotoAsync($"{FakeOrigin}/{DocPath}", new PageGotoOptions
+            },
+            new TextContentBlock
             {
-                WaitUntil = WaitUntilState.Load,
-                Timeout   = 15_000
-            });
-
-            // Wait for Highcharts SVG (generous timeout — geo JSON can be a few MB).
-            // On timeout, fall through and return a diagnostic screenshot + console log.
-            byte[]? imageData = null;
-            string  renderNote;
-            try
-            {
-                await page.WaitForFunctionAsync(
-                    $"() => document.querySelector('#{containerId} svg') !== null",
-                    null,
-                    new PageWaitForFunctionOptions { Timeout = 30_000 });
-
-                await page.WaitForTimeoutAsync(500);
-
-                var element = await page.QuerySelectorAsync($"#{containerId}");
-                var raw    = element is not null
-                    ? await element.ScreenshotAsync()
-                    : await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
-                // MCP protocol requires base64 string in "data". The SDK serialises
-                // ReadOnlyMemory<byte> as raw characters, not base64, so we encode
-                // the base64 string to ASCII bytes — those bytes become the base64
-                // string in JSON.
-                imageData  = System.Text.Encoding.ASCII.GetBytes(Convert.ToBase64String(raw));
-
-                // Also save to a temp file so the user can open it directly
-                // (Claude Desktop may not render the inline image in the chat UI).
-                var pngPath = Path.Combine(Path.GetTempPath(),
-                    Path.GetFileNameWithoutExtension(jsConfigPath) + "-preview.png");
-                await File.WriteAllBytesAsync(pngPath, raw);
-                renderNote = $"Rendered: {Path.GetFileName(jsConfigPath)}\nSaved to: {pngPath}";
+                Text = $"Interactive preview: {Path.GetFileName(jsConfigPath)}"
+                     + (sampleDataJson is not null ? " (with sample data)" : " (no data — all states grey)")
             }
-            catch (TimeoutException)
-            {
-                // SVG never appeared — grab a screenshot anyway so we can see the state
-                var rawTimeout = await page.ScreenshotAsync(new PageScreenshotOptions { FullPage = true });
-                imageData  = System.Text.Encoding.ASCII.GetBytes(Convert.ToBase64String(rawTimeout));
-                renderNote = $"TIMEOUT — SVG not found after 30s. Screenshot shows page state.";
-            }
-
-            var diagnostics = new System.Text.StringBuilder();
-            if (notFound.Count > 0)
-                diagnostics.AppendLine("404s: " + string.Join(", ", notFound));
-            if (consoleMessages.Count > 0)
-                diagnostics.AppendLine("Console:\n" + string.Join("\n", consoleMessages));
-
-            var result = new System.Collections.Generic.List<ContentBlock>
-            {
-                new ImageContentBlock { Data = imageData, MimeType = "image/png" },
-                new TextContentBlock  { Text = renderNote }
-            };
-            if (diagnostics.Length > 0)
-                result.Add(new TextContentBlock { Text = diagnostics.ToString().Trim() });
-
-            return result;
-        }
-        catch (Exception ex)
-        {
-            return [new TextContentBlock { Text = $"Render failed: {ex.Message}" }];
-        }
-    }
-
-    // Resolve a forward-slash relative URL path to a file on disk, matching each
-    // segment case-insensitively. Returns null if no matching file exists.
-    private static string? ResolveCaseInsensitive(string root, string relativeUrlPath)
-    {
-        var direct = Path.Combine(root, relativeUrlPath.Replace('/', Path.DirectorySeparatorChar));
-        if (File.Exists(direct)) return direct;
-
-        var current = root;
-        foreach (var seg in relativeUrlPath.Split('/', StringSplitOptions.RemoveEmptyEntries))
-        {
-            if (!Directory.Exists(current)) return null;
-            var match = Directory.EnumerateFileSystemEntries(current)
-                .FirstOrDefault(e => string.Equals(Path.GetFileName(e), seg, StringComparison.OrdinalIgnoreCase));
-            if (match is null) return null;
-            current = match;
-        }
-        return File.Exists(current) ? current : null;
+        ];
     }
 }
